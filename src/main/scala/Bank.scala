@@ -9,6 +9,9 @@ import akka.actor.typed.scaladsl.ActorContext
 import akka.actor.typed.scaladsl.AbstractBehavior
 import akka.actor.typed.Behavior
 import akka.actor.typed.scaladsl.Behaviors
+import akka.actor.typed.receptionist.Receptionist
+import akka.actor.typed.receptionist.ServiceKey
+import akka.persistence.typed.scaladsl.EventSourcedBehavior
 
 
 case class BankClient(name: String, balance: Int)
@@ -34,7 +37,7 @@ case class BankManagerRejection(id: UUID, reason: String) extends BankManagerRes
 /**
  * Manages clients via a Map of BankId -> BankClient
   */
-object Bank {
+private object Bank {
 
   // Keeps tract of generated accounts
   var cntr = 0
@@ -55,56 +58,60 @@ object Bank {
   }
 }
 
-class BankManager(context: ActorContext[BankManagerInput]) extends AbstractBehavior[BankManagerInput](context):
-  val bankObject = Bank
-
-  override def onMessage(msg: BankManagerInput): Behavior[BankManagerInput] = 
-    msg match {
-      case BankManagerCommand(cmd, id, replyTo) => 
-        try 
-          val event = cmd match {
-            case RegisterUser(newUser) => 
-              val acc = bankObject.registerUser(newUser)
-              context.log.info(s"Created account ${acc} for user ${newUser}}")
-              NewUserAccount(newUser.copy(bank=Some(acc)))
-            //case ... -> Add suppl cases here
-
-          }
-          replyTo ! BankManagerEvent(id, event)
-        catch 
-          case _ =>  replyTo ! BankManagerRejection(id, "Rejection From Bank: Catch All except")
-
-      //case BankManagerQuery
-    }
-    this //keep same behavoir
 
 object BankManager: 
-  def apply() = Behaviors.setup(context => new BankManager(context))
+  val Key: ServiceKey[BankManagerInput] = ServiceKey("BankManagerInput")
+  def apply(): Behavior[BankManagerInput] = 
+    Behaviors.setup { context =>
+      //register to the receptionist
+      context.system.receptionist ! Receptionist.Register(Key, context.self)
 
-// object BankManagerMain { 
-//   val usr1 = User("Lars", None)
-//   val usr2 = User("Lars2", None)
-//   def mkUUID() = UUID.randomUUID() //Used from message correlations ids
-//
-//   def apply(): Behavior[BankManagerResponse] = 
-//     Behaviors.setup { context =>
-//       val bankManager = context.spawn(BankManager(), "bankManager")
-//
-//       bankManager ! BankManagerCommand(RegisterUser(usr1), mkUUID(), context.self)
-//       bankManager ! BankManagerCommand(RegisterUser(usr2), mkUUID(), context.self)
-//
-//       Behaviors.receiveMessage { message => 
-//         message match {
-//           case BankManagerEvent(id, event) => 
-//             context.log.info("success ({}): {}", id, event)
-//             Behaviors.same
-//           case BankManagerRejection(id, reason) => 
-//             context.log.info("failure ({}): {}", id, reason)
-//             Behaviors.same
-//         }
-//       }
-//     }
-// }
-//
-// @main
-// def BankMain() = ActorSystem(BankManagerMain(), "BankManagerMain")
+      def active(): Behavior[BankManagerInput] = {
+        Behaviors.receive { (context, message) =>
+          message match {
+            case BankManagerCommand(cmd, id, replyTo) => 
+              try 
+                val event = cmd match {
+                  case RegisterUser(newUser) => 
+                    val acc = Bank.registerUser(newUser)
+                    context.log.info(s"Created account ${acc} for user ${newUser}")
+                    NewUserAccount(newUser.copy(bank=Some(acc)))
+                }
+                replyTo ! BankManagerEvent(id, event)
+              catch 
+                case _ =>  replyTo ! BankManagerRejection(id, "Rejection From Bank: Catch All except")
+          }
+          Behaviors.same
+        }
+      }
+      active()
+    }
+
+
+/* object BankManagerMain { 
+  val usr1 = User("Lars", None)
+  val usr2 = User("Lars2", None)
+  def mkUUID() = UUID.randomUUID() //Used from message correlations ids
+
+  def apply(): Behavior[BankManagerResponse] = 
+    Behaviors.setup { context =>
+      val bankManager = context.spawn(BankManager(), "bankManager")
+
+      bankManager ! BankManagerCommand(RegisterUser(usr1), mkUUID(), context.self)
+      bankManager ! BankManagerCommand(RegisterUser(usr2), mkUUID(), context.self)
+
+      Behaviors.receiveMessage { message => 
+        message match {
+          case BankManagerEvent(id, event) => 
+            context.log.info("success ({}): {}", id, event)
+            Behaviors.same
+          case BankManagerRejection(id, reason) => 
+            context.log.info("failure ({}): {}", id, reason)
+            Behaviors.same
+        }
+      }
+    }
+}
+
+@main
+def BankMain() = ActorSystem(BankManagerMain(), "BankManagerMain") */

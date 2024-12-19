@@ -63,11 +63,11 @@ object HelloWorldMain {
     }
 }
 
-object ActorBasics extends App {
-
-  val system: ActorSystem[HelloWorldMain.SayHello] = ActorSystem(HelloWorldMain(), "hello")
-
-  system ! HelloWorldMain.SayHello("World") // => 
-  system ! HelloWorldMain.SayHello("Akka")
-
-}
+// object ActorBasics extends App {
+//
+//   val system: ActorSystem[HelloWorldMain.SayHello] = ActorSystem(HelloWorldMain(), "hello")
+//
+//   system ! HelloWorldMain.SayHello("World") // => 
+//   system ! HelloWorldMain.SayHello("Akka")
+//
+// }
