@@ -1,73 +1,44 @@
-import akka.actor.typed.ActorRef
+package eBayMicroServ
+
+import akka.actor.typed.ActorSystem
 import akka.actor.typed.Behavior
 import akka.actor.typed.scaladsl.Behaviors
-import akka.actor.typed.ActorSystem
-import HelloWorld.Greeted
+import akka.NotUsed
+import akka.actor.Terminated
 
-object HelloWorld {
-  final case class Greet(whom: String, replyTo: ActorRef[Greeted])
-  final case class Greeted(whom: String, from: ActorRef[Greet])
+case class User(name: String, bank: Option[BankAccount] = None)
 
-  def apply(): Behavior[Greet] = Behaviors.receive {
-    (context, message) => 
+object eBayMainActor {
+  val usr1 = User("Lars")
+  // val usr2 = User("Lars2", None)
 
-    context.log.info("Hello  {}!", message.whom)
-    println(s"Hello ${message.whom}!")
-
-    //replyTo is of type ActorRef[Greeted] => ! operator will only allow messages of type Greeted
-    message.replyTo ! Greeted(message.whom, context.self)
-    Behaviors.same
-  }
-}
-
-object HelloWorldBot {
-
-  def apply(max: Int): Behavior[HelloWorld.Greeted] = {
-    bot(0, max)
-  }
-
-  private def bot(greetingCounter: Int, max: Int): Behavior[HelloWorld.Greeted] =
-    //message here is a response from HelloWorld Actor => Greeted
-    Behaviors.receive { (context, message) =>
-      message match  { 
-        case Greeted(whom, from) => {
-          val n = greetingCounter + 1
-          context.log.info("Greeting {} for {}", n, whom)
-          println(s"Greeting $n for ${whom}")
-          if (n == max) {
-            Behaviors.stopped
-          } else {
-            from ! HelloWorld.Greet(whom, context.self) //message.from is source of message => ActorRef[Greet]
-            bot(n, max)
-          }
-        }
-      }
-    }
-}
-
-object HelloWorldMain {
-
-  final case class SayHello(name: String)
-
-  def apply(): Behavior[SayHello] =
+  def apply(): Behavior[NotUsed] = 
     Behaviors.setup { context =>
-      //Greeter is executed only once i guess, to spawn HelloWorld Actor
-      val greeter = context.spawn(HelloWorld(), "greeter")
+      val bankRef = context.spawn(BankGateway(), "bankManager")
+      val ebayRef = context.spawn(PersistentEbayManager(), "EbayManager")
+      val sellers = (1 to 2).map(pos => context.spawnAnonymous(Seller(User(s"Seller${pos}"))))
+      val bidders = (1 to 1).map(pos => context.spawnAnonymous(Bidder(User(s"Bidder${pos}"), ebayRef)))
+      
+      // val sellerRef = context.spawn(Seller(usr1, bankRef), "Seller1")
 
-      Behaviors.receiveMessage { message =>
-        println(s"Hello World Main recv message ${message}")              //message is SayHello("World") or SayHello("Akka")
-        val replyTo = context.spawn(HelloWorldBot(max = 3), message.name) //message.name is World or Akka
-        greeter ! HelloWorld.Greet(message.name, replyTo)                 //send message.name and senderRef to greeter
-        Behaviors.same
-      }
+      Thread.sleep(3000)
+
+      // sellers.foreach(seller => seller ! CreateAuction(10, "Test"))
+      sellers(0) ! CreateAuction(100, "AnItem")
+      sellers(1) ! CreateAuction(100, "AnItem")
+      //sellers(1) ! CreateAuction(10, "AnotherItem")
+      bidders(0) ! GetAuctions()
+
+      Behaviors.empty
     }
 }
 
-// object ActorBasics extends App {
-//
-//   val system: ActorSystem[HelloWorldMain.SayHello] = ActorSystem(HelloWorldMain(), "hello")
-//
-//   system ! HelloWorldMain.SayHello("World") // => 
-//   system ! HelloWorldMain.SayHello("Akka")
-//
-// }
+// @main
+// def runManagerEbay() = ActorSystem(eBayMainActor(), "eBayMainActor")
+
+object eBayMain extends App {
+  def runManager() = ActorSystem(eBayMainActor(), "eBayMainActor")
+  val system = runManager()
+  Thread.sleep(4000)
+  system.terminate()
+}

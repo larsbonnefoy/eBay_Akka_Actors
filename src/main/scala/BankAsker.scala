@@ -6,20 +6,22 @@ import akka.actor.typed.scaladsl.Behaviors
 import akka.actor.typed.receptionist.Receptionist
 import java.util.UUID
 
-trait BankAskerCommands
-case class StartRegistration() extends BankAskerCommands
+sealed trait AuthBank
+case class AuthUser(user: User) extends AuthBank
 
+sealed trait BankAskerCommands
+case class StartRegistration(user: User, replyTo: ActorRef[AuthUser]) extends BankAskerCommands
 
 private object ResponseHandlerChild:
-  def apply(corrID: UUID, replyTo: ActorRef[SellerAction]): Behavior[BankManagerResponse] = {
+  def apply(corrID: UUID, replyTo: ActorRef[AuthUser]): Behavior[BankGatewayResponse] = {
     Behaviors.setup { context => 
       Behaviors.receive { (context, message) =>
         message match {
-          case BankManagerEvent(id, event) => 
+          case BankGatewayEvent(id, event) => 
             event match {
-              case NewUserAccount(userWithAccount) => replyTo ! AuthSeller(userWithAccount)
+              case NewUserAccount(userWithAccount) => replyTo ! AuthUser(userWithAccount)
             }
-          case BankManagerRejection(id, reason) => context.log.error("Could not Auth User")
+          case BankGatewayRejection(id, reason) => context.log.error("Could not Auth User")
         }
         Behaviors.stopped
       }
@@ -28,32 +30,31 @@ private object ResponseHandlerChild:
 
 
 object BankAsker:
-  private final case class WrappedReceptionistRes(
-      bankRef: Option[ActorRef[BankManagerInput]]
-  ) extends BankAskerCommands
+  private final case class WrappedReceptionistRes(bankRef: Option[ActorRef[BankGatewayInput]]) extends BankAskerCommands
 
-  def apply(user: User, replyTo: ActorRef[SellerAction]): Behavior[BankAskerCommands] = {
+  def apply(): Behavior[BankAskerCommands] = {
     Behaviors.setup { context =>
 
-      val bankRefMapper: ActorRef[Receptionist.Listing] =
-        context.messageAdapter { case BankGateway.Key.Listing(set) =>
-          WrappedReceptionistRes(set.headOption)
-        }
+      val bankRefMapper: ActorRef[Receptionist.Listing] = context.messageAdapter { 
+        case BankGateway.Key.Listing(set) => WrappedReceptionistRes(set.headOption) }
 
-      context.system.receptionist ! Receptionist.Find(
-        BankGateway.Key,
-        bankRefMapper
-      )
+      var replyTo: Option[ActorRef[AuthUser]] = None
+      var user: Option[User] = None
 
       Behaviors.receive { (context, message) =>
         message match {
+          case StartRegistration(userFromMsg, replyToFromMsg) => {
+            context.system.receptionist ! Receptionist.Find(BankGateway.Key, bankRefMapper)
+            replyTo = Some(replyToFromMsg)
+            user = Some(userFromMsg)
+          }
           case WrappedReceptionistRes(optionRef) => {
             optionRef match {
               case Some(bankRef) => {
                 context.log.info(s"Got ${bankRef}")
                 val corrId = mkUUID()
-                val childActor = context.spawnAnonymous(ResponseHandlerChild(corrId, replyTo))
-                bankRef ! BankManagerCommand(RegisterUser(user), corrId, childActor)
+                val childActor = context.spawnAnonymous(ResponseHandlerChild(corrId, replyTo.get))
+                bankRef ! BankGatewayCommand(RegisterUser(user.get), corrId, childActor)
                 // bankRef ! BankManagerCommand(RegisterUser(user), mkUUID(), bankResponseMapper)
               }
               case None =>

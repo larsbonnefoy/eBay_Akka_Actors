@@ -25,13 +25,13 @@ case class RegisterUser(newUser: User) extends BankCommand
 sealed trait  BankEvent extends BankMessage
 case class NewUserAccount(user: User) extends BankEvent
 
-trait BankManagerInput 
-case class BankManagerCommand(cmd: BankCommand, id: UUID, replyTo: ActorRef[BankManagerResponse]) extends BankManagerInput
+trait BankGatewayInput 
+case class BankGatewayCommand(cmd: BankCommand, id: UUID, replyTo: ActorRef[BankGatewayResponse]) extends BankGatewayInput
 // case class BankManagerQuery(cmd: BankCommand, replyTo: ActorRef[BankManagerResponse]) extends BankManagerInput
 
-trait BankManagerResponse
-case class BankManagerEvent(id: UUID, event: BankEvent) extends BankManagerResponse
-case class BankManagerRejection(id: UUID, reason: String) extends BankManagerResponse
+trait BankGatewayResponse
+case class BankGatewayEvent(id: UUID, event: BankEvent) extends BankGatewayResponse
+case class BankGatewayRejection(id: UUID, reason: String) extends BankGatewayResponse
 
 
 /**
@@ -60,16 +60,16 @@ private object Bank {
 
 
 object BankGateway: 
-  val Key: ServiceKey[BankManagerInput] = ServiceKey("BankManagerInput")
-  def apply(): Behavior[BankManagerInput] = 
+  val Key: ServiceKey[BankGatewayInput] = ServiceKey("BankManagerInput")
+  def apply(): Behavior[BankGatewayInput] = 
     Behaviors.setup { context =>
       //register to the receptionist
       context.system.receptionist ! Receptionist.Register(Key, context.self)
 
-      def active(): Behavior[BankManagerInput] = {
+      def active(): Behavior[BankGatewayInput] = {
         Behaviors.receive { (context, message) =>
           message match {
-            case BankManagerCommand(cmd, id, replyTo) => 
+            case BankGatewayCommand(cmd, id, replyTo) => 
               try 
                 val event = cmd match {
                   case RegisterUser(newUser) => 
@@ -77,9 +77,9 @@ object BankGateway:
                     context.log.info(s"Created account ${acc} for user ${newUser}")
                     NewUserAccount(newUser.copy(bank=Some(acc)))
                 }
-                replyTo ! BankManagerEvent(id, event)
+                replyTo ! BankGatewayEvent(id, event)
               catch 
-                case _ =>  replyTo ! BankManagerRejection(id, "Rejection From Bank: Catch All except")
+                case _ =>  replyTo ! BankGatewayRejection(id, "Rejection From Bank: Catch All except")
           }
           Behaviors.same
         }

@@ -9,6 +9,7 @@ import scala.collection.immutable.TreeSet
 import akka.persistence.typed.PersistenceId
 import akka.persistence.typed.scaladsl.Effect
 import akka.actor.typed.receptionist.Receptionist
+import akka.actor.Actor
 
 //Bid will probably need to be exposed so that a Bidder can place a Bid
 //Should probably go into the Bidder Class
@@ -20,6 +21,7 @@ sealed trait AuctionCommand extends AuctionMessage
 case class InitAuction(item: AuctionableItem, replyToAuc: ActorRef[AuctionEvent], replyToEbay: ActorRef[ebayEvent]) extends AuctionCommand //-> Dont need this message as the auction is created when Actor is initalized
 case class RemoveAuction() extends AuctionCommand
 case class PlaceBid(bid: Bid) extends AuctionCommand
+case class GetMaxBid(replyTo: ActorRef[Any]) extends AuctionCommand
 
 sealed trait AuctionEvent extends AuctionMessage
 case class AuctionCreated(item: AuctionableItem, auctionRef: AuctionRef) extends AuctionEvent
@@ -117,6 +119,7 @@ object PersistentAuctionManager:
               }
               Effect.none
             }
+            case GetMaxBid(_) => ???
           }
         }, 
         eventHandler = {(state, event) =>
