@@ -8,16 +8,16 @@ import akka.persistence.typed.scaladsl.EventSourcedBehavior
 import scala.collection.immutable.TreeSet
 import akka.persistence.typed.PersistenceId
 import akka.persistence.typed.scaladsl.Effect
+import akka.actor.typed.receptionist.Receptionist
 
 //Bid will probably need to be exposed so that a Bidder can place a Bid
 //Should probably go into the Bidder Class
-case class BidderRef(id: UUID)
 case class Bid(bidder: BidderRef, amount: Int)
 
 trait AuctionMessage
 
 sealed trait AuctionCommand extends AuctionMessage
-case class InitAuction(item: AuctionableItem, replyTo: ActorRef[AuctionEvent]) extends AuctionCommand //-> Dont need this message as the auction is created when Actor is initalized
+case class InitAuction(item: AuctionableItem, replyToAuc: ActorRef[AuctionEvent], replyToEbay: ActorRef[ebayEvent]) extends AuctionCommand //-> Dont need this message as the auction is created when Actor is initalized
 case class RemoveAuction() extends AuctionCommand
 case class PlaceBid(bid: Bid) extends AuctionCommand
 
@@ -48,11 +48,10 @@ case class Auction(item: AuctionableItem, auctionRef: AuctionRef, bids: TreeSet[
   }
 
   def placeBid(bid: Bid) = 
-    require(bid.amount > currPrice, s"Bid is too low. Proposed price: ${bid.amount}, Current price: ${currPrice}")
+    //require(bid.amount > currPrice, s"Bid is too low. Proposed price: ${bid.amount}, Current price: ${currPrice}")
     this.copy(bids = bids + bid)
 
   def initAuction(item: AuctionableItem, auctionRef: AuctionRef) = 
-    require(item.startingPrice > 0, "Price cannot be negative")
     this.copy(item=item, auctionRef=auctionRef)
 
   def applyEvent(event: AuctionEvent) = 
@@ -64,20 +63,59 @@ case class Auction(item: AuctionableItem, auctionRef: AuctionRef, bids: TreeSet[
     }
 
 object PersistentAuctionManager:
+
+  private final case class WrappedBankResponse(resp: BankGatewayResponse) extends AuctionCommand
+  private final case class ReceptionistEbay(bankRef: Option[ActorRef[ebayCommand]]) extends AuctionCommand
+
   def apply(): Behavior[AuctionCommand] =
     Behaviors.setup { context =>
 
       val auctionUUID = mkUUID()
 
+      //Different actor references are kept within the Manager 
+      //and not the state
+      var ebayRef: Option[ActorRef[ebayCommand]] = None
+      var ownerRefAuction: Option[ActorRef[AuctionEvent]] = None
+      var ownerRefEbay: Option[ActorRef[ebayEvent]] = None
+
+      val ebayReceptionistMapper: ActorRef[Receptionist.Listing] = context.messageAdapter { 
+        case PersistentEbayManager.Key.Listing(set) => ReceptionistEbay(set.headOption)
+      }
+      context.log.info(s"Created Auction Manager")
+
       EventSourcedBehavior[AuctionCommand, AuctionEvent, Auction] (
         persistenceId = PersistenceId.ofUniqueId(auctionUUID.toString()),
         emptyState = Auction.default, 
-        commandHandler = {(_, command) =>
+        commandHandler = {(state, command) =>
           command match {
             case PlaceBid(bid) => ???
             case RemoveAuction() => ???
-            case InitAuction(item, replyTo) => {
-              Effect.persist(AuctionCreated(item, AuctionRef(auctionUUID))).thenReply(replyTo)(_ => AckAuction("Created Auction"))
+            case InitAuction(item, replyToAuc, replyToEbay) => {
+              ownerRefAuction = Some(replyToAuc)
+              ownerRefEbay = Some(replyToEbay)
+              try {
+                require(item.startingPrice > 0, "Price cannot be negative")
+                //Require Ebay ref to send created auction
+                context.system.receptionist ! Receptionist.Find(PersistentEbayManager.Key, ebayReceptionistMapper)
+                Effect.persist(AuctionCreated(item, AuctionRef(auctionUUID)))
+                  .thenReply(replyToAuc)(_ => AckAuction("Auction Valid"))
+              }
+              catch {
+                case e: Exception => Effect.none.thenReply(replyToAuc)(_ => AckAuction(e.getMessage()))
+              }
+            }
+            case WrappedBankResponse(_) => ???
+
+            case ReceptionistEbay(optionRef) => {
+              optionRef match {
+                case Some(ref) => {
+                  ebayRef = optionRef
+                  context.log.info("Sent Registration Request")
+                  ref ! RegisterAuction(AuctionListing(state.item.owner.sellerId, state.auctionRef, context.self), ownerRefEbay.get)
+                }
+                case None => context.log.error("eBay not registered")
+              }
+              Effect.none
             }
           }
         }, 
@@ -86,7 +124,9 @@ object PersistentAuctionManager:
           context.log.info("Current state of the data: {}", updatedResult)
           updatedResult
         })
-      }
+    }
+
+
 
   /*
 

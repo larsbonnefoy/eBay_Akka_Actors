@@ -1,20 +1,62 @@
 package eBayMicroServ
-package eBayMicroServ
+
 import akka.actor.typed.ActorRef
 import akka.actor.typed.Behavior
 import akka.actor.typed.scaladsl.Behaviors
 import akka.persistence.typed.scaladsl.EventSourcedBehavior
-import scala.collection.immutable.TreeSet
+import scala.collection.immutable.Set
 import akka.persistence.typed.PersistenceId
 import akka.persistence.typed.scaladsl.Effect
+import akka.actor.typed.receptionist.ServiceKey
+import akka.actor.typed.receptionist.Receptionist
 
 
-final case class AuctionListing(seller: SellerRef, auction: AuctionRef, replyTo: ActorRef[AuctionCommand])
+final case class AuctionListing(seller: SellerRef, auction: AuctionRef, aucAccRef: ActorRef[AuctionCommand])
 
-trait ebayCommand
-case class RegisterAuction(seller: SellerRef, auction: AuctionRef, replyTo: ActorRef[AuctionCommand])
+trait ebayMessage
 
-trait ebayEvent
-case class RegisteredAuction(seller: SellerRef , auction: AuctionRef, replyTo: ActorRef[AuctionCommand])
+sealed trait ebayCommand extends ebayMessage
+case class RegisterAuction(aucc: AuctionListing, replyTo: ActorRef[ebayEvent]) extends ebayCommand
 
-case class eBay(auctions: TreeSet[AuctionListing])
+sealed trait ebayEvent extends ebayMessage
+case class RegisteredAuction(aucc: AuctionListing) extends ebayEvent
+case class ebayAck(msg: String) extends ebayEvent
+
+
+case class eBay(auctions: Set[AuctionListing]): 
+  def addAuction(auc: AuctionListing) = this.copy(auctions = auctions + auc)
+
+  def applyEvent(event: ebayEvent) = { 
+    event match {
+      case RegisteredAuction(auction) => addAuction(auction)
+    }
+  }
+  
+
+object PersistentEbayManager: 
+  val Key: ServiceKey[ebayCommand] = ServiceKey("ebayCommand")
+  def apply(): Behavior[ebayCommand] = 
+    Behaviors.setup { context =>
+
+    //Need to register to the Receptionist
+    context.system.receptionist ! Receptionist.Register(Key, context.self)
+
+    EventSourcedBehavior[ebayCommand, ebayEvent, eBay] (
+      persistenceId = PersistenceId.ofUniqueId("eBay"),
+      emptyState = eBay(Set.empty),
+      commandHandler = {(_, command) =>
+        command match {
+          case RegisterAuction(aucc, replyTo) =>  Effect.persist(RegisteredAuction(aucc)).thenReply(replyTo)(_ => ebayAck("Auction Registered Successfully"))
+        }
+      },
+      eventHandler = {(state, event) => 
+        val updatedResult = state.applyEvent(event)
+        context.log.info("Current state of the data: {}", updatedResult)
+        updatedResult
+      }
+
+    )
+
+
+
+    }

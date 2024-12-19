@@ -59,7 +59,7 @@ private object Bank {
 }
 
 
-object BankManager: 
+object BankGateway: 
   val Key: ServiceKey[BankManagerInput] = ServiceKey("BankManagerInput")
   def apply(): Behavior[BankManagerInput] = 
     Behaviors.setup { context =>
