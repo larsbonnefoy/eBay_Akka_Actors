@@ -6,6 +6,7 @@ resolvers += "Akka library repository".at("https://repo.akka.io/maven")
 libraryDependencies ++= Seq(
   "com.typesafe.akka" %% "akka-actor-typed" % AkkaVersion,
   "com.typesafe.akka" %% "akka-persistence-typed" % AkkaVersion,
+  "com.typesafe.akka" %% "akka-cluster-sharding-typed" % AkkaVersion,
   "com.typesafe.akka" %% "akka-actor-testkit-typed" % AkkaVersion % Test,
 
   "ch.qos.logback" % "logback-classic" % "1.4.11", // Logback Classic

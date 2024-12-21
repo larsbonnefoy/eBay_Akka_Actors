@@ -5,6 +5,7 @@ import akka.actor.typed.Behavior
 import akka.actor.typed.scaladsl.Behaviors
 import akka.NotUsed
 import akka.actor.Terminated
+import akka.event.Logging
 
 case class User(name: String, bank: Option[BankAccount] = None)
 
@@ -14,20 +15,22 @@ object eBayMainActor {
 
   def apply(): Behavior[NotUsed] = 
     Behaviors.setup { context =>
-      val bankRef = context.spawn(BankGateway(), "bankManager")
-      val ebayRef = context.spawn(PersistentEbayManager(), "EbayManager")
+      val bankRef = context.spawn(BankGateway(), "Bank")
+      val ebayRef = context.spawn(eBay(), "eBay")
       val sellers = (1 to 2).map(pos => context.spawnAnonymous(Seller(User(s"Seller${pos}"))))
       val bidders = (1 to 1).map(pos => context.spawnAnonymous(Bidder(User(s"Bidder${pos}"), ebayRef)))
       
-      // val sellerRef = context.spawn(Seller(usr1, bankRef), "Seller1")
+      Thread.sleep(1000)
 
-      Thread.sleep(3000)
+      // sellers.foreach(seller => seller ! Seller.CreateAuction("Test", 10))
+      sellers(0) ! Seller.CreateAuction("First", 1)
+      sellers(1) ! Seller.CreateAuction("Second", 100)
 
-      // sellers.foreach(seller => seller ! CreateAuction(10, "Test"))
-      sellers(0) ! CreateAuction(100, "AnItem")
-      sellers(1) ! CreateAuction(100, "AnItem")
-      //sellers(1) ! CreateAuction(10, "AnotherItem")
-      bidders(0) ! GetAuctions()
+      //Bidds need to be Created before we can call GetAuctions
+      Thread.sleep(1000)
+
+      // //sellers(1) ! CreateAuction(10, "AnotherItem")
+      bidders(0) ! Bidder.GetAuctions()
 
       Behaviors.empty
     }

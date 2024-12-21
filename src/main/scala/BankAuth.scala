@@ -6,33 +6,32 @@ import akka.actor.typed.scaladsl.Behaviors
 import akka.actor.typed.receptionist.Receptionist
 import java.util.UUID
 
-sealed trait AuthBank
-case class AuthUser(user: User) extends AuthBank
 
-sealed trait BankAskerCommands
-case class StartRegistration(user: User, replyTo: ActorRef[AuthUser]) extends BankAskerCommands
+object BankAuth:
+  sealed trait Command
+  case class StartRegistration(user: User, replyTo: ActorRef[AuthUser]) extends Command
 
-private object ResponseHandlerChild:
-  def apply(corrID: UUID, replyTo: ActorRef[AuthUser]): Behavior[BankGatewayResponse] = {
-    Behaviors.setup { context => 
-      Behaviors.receive { (context, message) =>
-        message match {
-          case BankGatewayEvent(id, event) => 
-            event match {
-              case NewUserAccount(userWithAccount) => replyTo ! AuthUser(userWithAccount)
-            }
-          case BankGatewayRejection(id, reason) => context.log.error("Could not Auth User")
+  sealed trait Response
+  case class AuthUser(user: User) extends Response
+  private final case class WrappedReceptionistRes(bankRef: Option[ActorRef[BankGatewayInput]]) extends Command
+
+  private object ResponseHandlerChild:
+    def apply(corrID: UUID, replyTo: ActorRef[AuthUser]): Behavior[BankGatewayResponse] = {
+      Behaviors.setup { context => 
+        Behaviors.receive { (context, message) =>
+          message match {
+            case BankGatewayEvent(id, event) => 
+              event match {
+                case NewUserAccount(userWithAccount) => replyTo ! AuthUser(userWithAccount)
+              }
+            case BankGatewayRejection(id, reason) => context.log.error("Could not Auth User")
+          }
+          Behaviors.stopped
         }
-        Behaviors.stopped
       }
     }
-  }
 
-
-object BankAsker:
-  private final case class WrappedReceptionistRes(bankRef: Option[ActorRef[BankGatewayInput]]) extends BankAskerCommands
-
-  def apply(): Behavior[BankAskerCommands] = {
+  def apply(): Behavior[Command] = {
     Behaviors.setup { context =>
 
       val bankRefMapper: ActorRef[Receptionist.Listing] = context.messageAdapter { 
@@ -63,7 +62,7 @@ object BankAsker:
             }
           }
         }
-        Behaviors.same
+        Behaviors.stopped
       }
     }
   }
