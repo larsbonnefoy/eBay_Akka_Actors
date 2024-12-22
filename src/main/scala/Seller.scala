@@ -13,6 +13,8 @@ import akka.persistence.typed.scaladsl.EventSourcedBehavior
 import akka.persistence.typed.PersistenceId
 import akka.persistence.typed.scaladsl.Effect
 import akka.actor.typed.SupervisorStrategy
+import akka.util.Timeout
+import scala.util.{Try, Success, Failure}
 
 case class AuctionableItem(owner: Seller.Info, startingPrice: Int, itemType : String)
 
@@ -43,38 +45,62 @@ object Seller:
 
   }
 
-  private final case class WrappedAuth(resp: BankAuth.AuthUser) extends Command
   private case class Init(usr: User, id: SellerId) extends Command
+  private case class ListingResponse(listing: Receptionist.Listing) extends Command
+  private case class GotBank(usr: User) extends Command
+  private case object Ignore extends Command
 
   def apply(user: User): Behavior[Command] = {
     Behaviors.setup { context =>
+      import scala.concurrent.duration.DurationInt
+      implicit val timeout: Timeout = 3.seconds
       val id = mkUUID()
 
       context.self ! Seller.Init(user, SellerId(id))
 
-      val authMapper: ActorRef[BankAuth.AuthUser] = context.messageAdapter(rsp => WrappedAuth(rsp))
+      val listingAdapter = context.messageAdapter[Receptionist.Listing](rsp => ListingResponse(rsp))
 
       def commandHandlerImpl(state: State, command: Command): Effect[Event, State] = {
         command match {
           case Init(newUser, id) => {
-            val asker = context.spawnAnonymous(BankAuth())
-            asker ! BankAuth.StartRegistration(newUser, authMapper)
+            context.system.receptionist ! Receptionist.Find(BankGateway.Key, listingAdapter)
             Effect.persist(Created(newUser, id))
           }
-          case WrappedAuth(resp) => {
-            context.log.info(s"Got Account from Bank ${resp}")
-            Effect.persist(AddedBank(resp.user))
+          case ListingResponse(BankGateway.Key.Listing(listings)) => {
+            listings.headOption match {
+              case Some(bankGateWayRef) => {
+                context.ask(bankGateWayRef, (replyTo: ActorRef[BankGatewayResponse]) => BankGatewayCommand(RegisterUser(state.user), mkUUID(), replyTo)) {
+                  case scala.util.Success(BankGatewayEvent(id, event)) => {
+                    event match
+                      case NewUserAccount(user) => GotBank(user)
+                    }
+                  case scala.util.Failure(_) => context.log.error("BankGateWay Ask Failed"); Ignore
+                }
+                Effect.none
+              }
+              case None => context.log.error("Error with Receptionist Listing, Got None"); Effect.none
+            }
           }
+          case Ignore => Effect.none
+
+          case GotBank(usr) =>  {
+            context.log.info(s"HERE: Got Account from Bank ${usr}")
+            Effect.persist(AddedBank(usr))
+          }
+
           case CreateAuction(item, price) => {
-            val aucItem = AuctionableItem(Info(state.user, state.id), price, item)
-            val auc = context.spawnAnonymous(Auction(aucItem, context.self))
+            state.user.bank match {
+              case Some(_) => {
+                val aucItem = AuctionableItem(Info(state.user, state.id), price, item)
+                val auc = context.spawnAnonymous(Auction(aucItem, context.self))
+              }
+              case None => context.log.error(s"Seller {state.user} as no bankAccount")
+
+            }
             Effect.none
           }
-          //   auction = context.spawnAnonymous(Auction())
-          //
-          //
-          // }
           case Reply(code, msg) => context.log.info(s"${code}: ${msg}"); Effect.none
+          case ListingResponse(_) => ??? // For some reason Match case is not happy, case is present twice
         }
       }
 

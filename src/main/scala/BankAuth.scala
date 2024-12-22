@@ -19,6 +19,7 @@ object BankAuth:
     def apply(corrID: UUID, replyTo: ActorRef[AuthUser]): Behavior[BankGatewayResponse] = {
       Behaviors.setup { context => 
         Behaviors.receive { (context, message) =>
+          context.log.info("HERE: Child Got response")
           message match {
             case BankGatewayEvent(id, event) => 
               event match {
@@ -43,6 +44,7 @@ object BankAuth:
       Behaviors.receive { (context, message) =>
         message match {
           case StartRegistration(userFromMsg, replyToFromMsg) => {
+            context.log.info("HERE: Got Auth Registration Query")
             context.system.receptionist ! Receptionist.Find(BankGateway.Key, bankRefMapper)
             replyTo = Some(replyToFromMsg)
             user = Some(userFromMsg)
@@ -50,7 +52,7 @@ object BankAuth:
           case WrappedReceptionistRes(optionRef) => {
             optionRef match {
               case Some(bankRef) => {
-                context.log.info(s"Got ${bankRef}")
+                context.log.info("HERE: Got Bank Ref from Receptionist")
                 val corrId = mkUUID()
                 val childActor = context.spawnAnonymous(ResponseHandlerChild(corrId, replyTo.get))
                 bankRef ! BankGatewayCommand(RegisterUser(user.get), corrId, childActor)

@@ -10,10 +10,14 @@ import akka.persistence.typed.scaladsl.Effect
 import akka.actor.typed.receptionist.ServiceKey
 import akka.actor.typed.receptionist.Receptionist
 import akka.pattern.ask
+import scala.util.Success
+import scala.concurrent.duration.DurationInt
+import akka.util.Timeout
 
 
 object eBay:
   val Key: ServiceKey[Command] = ServiceKey("ebayCommand")
+
   final case class AuctionListing(auction: Auction.Id, auctionRef: ActorRef[Auction.Command])
 
   /**eBay Protocol**/
@@ -26,7 +30,9 @@ object eBay:
   case class RegisteredAuction(aucc: AuctionListing) extends Event
   case class ebayAck(msg: String) extends Event
 
+  case class AuctionListResult(list: List[DisplayableAuction]) extends Command
 
+  private case object Ignore extends Command
   private case class State(auctions: Set[AuctionListing]):
     def addAuction(auc: AuctionListing) = this.copy(auctions = auctions + auc)
 
@@ -35,6 +41,7 @@ object eBay:
         case RegisteredAuction(auction) => addAuction(auction)
       }
     }
+
   def apply(): Behavior[Command] =
     Behaviors.setup { context =>
 
@@ -53,15 +60,30 @@ object eBay:
                 .thenReply(replyTo)(_ =>
                   Seller.Reply(StatusCode.OK, "Auction Registered Successfully")
                 )
+
             case AvailableAuctions(replyTo) => {
               val refSet = state.auctions.map(auction => auction.auctionRef)
               if (refSet.isEmpty)
                 Effect.none.thenReply(replyTo)(_ => Bidder.Reply(StatusCode.Failed, "No Bids available"))
               else
-                val list = context.spawnAnonymous(AuctionList())
-                list ! AuctionList.Get(refSet, context.self)
-                Effect.none.thenReply(replyTo)(_ => Bidder.Reply(StatusCode.OK, "Sent request to aggreg"))
+                val auctionListActor = context.spawnAnonymous(AuctionList())
+                // Cannot reply to Bidder directly, it will terminate the Ask Pattern
+                //replyTo ! Bidder.Reply(StatusCode.OK, "Sent request to aggreg")
+                implicit val timeout: Timeout = 3.seconds
+                context.ask(auctionListActor, (replyTo: ActorRef[eBay.Command])  => AuctionList.Get(refSet, replyTo)) {
+                  case arg @ scala.util.Success(eBay.AuctionListResult(lst)) =>  {
+                    replyTo ! Bidder.AuctionListResult(lst)
+                    Ignore
+                  }
+                  case arg @ scala.util.Failure(_) => context.log.error(s"Got unexpected Argument ${arg}"); Ignore
+                  case arg @ scala.util.Success(_) => context.log.error(s"Got unexpected Argument ${arg}"); Ignore
+                }
+                Effect.none
+                  // list ! AuctionList.Get(refSet, context.self)
+                  // Effect.none.thenReply(replyTo)(_ => Bidder.Reply(StatusCode.OK, "Sent request to aggreg"))
             }
+            case Ignore => Effect.none
+            case AuctionListResult(_) => ???
           }
         },
         eventHandler = { (state, event) =>
