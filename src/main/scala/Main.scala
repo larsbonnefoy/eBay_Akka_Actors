@@ -27,7 +27,7 @@ object eBayMainActor {
       val ebayRef = context.spawn(eBay(), "eBay")
 
       val sellers = (1 to 2).map(pos => context.spawnAnonymous(Seller(User(s"Seller${pos}"))))
-      val bidders = (1 to 1).map(pos => context.spawnAnonymous(Bidder(User(s"Bidder${pos}"), ebayRef)))
+      val bidders = (1 to 2).map(pos => context.spawnAnonymous(Bidder(User(s"Bidder${pos}"), ebayRef)))
 
       Thread.sleep(2000)
       context.log.info("Creating Auctions")
@@ -47,9 +47,9 @@ object eBayMainActor {
           case AuctionList(lst) => {
               lst.foreach(elt => context.log.info(s"- ${elt}"))
               bidders(0) ! Bidder.PlaceBid(10, lst(0).auctionRef)
-
-              // Thread.sleep(1000) //Wait a bit that bid is placed
-              bidders(0) ! Bidder.RemoveBid(lst(0).auctionRef)
+              bidders(1) ! Bidder.PlaceBid(100, lst(0).auctionRef)
+              //Thread.sleep(1000) //Wait a bit that bid is placed
+              bidders(1) ! Bidder.RemoveBid(lst(0).auctionRef)
           }
           Behaviors.same
         }

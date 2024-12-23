@@ -18,27 +18,34 @@ import akka.util.Timeout
 import _root_.eBayMicroServ.Seller.Info
 import akka.actor.typed.pubsub.PubSub
 import akka.actor.typed.pubsub.Topic
+import akka.actor.Status
 
 object Auction:
   case class Id(id: UUID)
 
-  
-
   //With PubSub, Commands are used to subscribe (Placing a Bid) and unsubscribe(Removing Bid)
-  //Events are used as Published Messages
+  //Events lead to published messages sent back to Bidder. 
+  //Add a Publish protocol, otherwise we would need to send back "Events" and expose internal state
+  ///When subscribing: provide actorRef for direct reply and message Adapater to published Events
   trait Message
 
-  
   sealed trait Command extends Message
   case class Remove(seller: Seller.Info, replyTo: ActorRef[Seller.Command]) extends Command
-  case class PlaceBid(bid: Bid, replyTo: ActorRef[Auction.Event]) extends Command
-  case class CancelBid(bidder: Bidder.Info, replyTo: ActorRef[Auction.Event]) extends Command
   case class GetMaxBid(replyTo: ActorRef[AuctionList.ResultFragment]) extends Command
+  case class PlaceBid(bid: Bid, replyTo: ActorRef[Bidder.Command], subscribe: ActorRef[Auction.Publish]) extends Command
+  case class CancelBid(bidder: Bidder.Info, replyTo: ActorRef[Bidder.Command]) extends Command
 
   sealed trait Event extends Message
-  private final case class AuctionCreated(item: AuctionableItem, auctionId: Id) extends Event
-  private final case class BidPlaced(bid: Bid, replyTo: ActorRef[Bidder.Command]) extends Event
-  final case class RemovedBid(bidder: Bidder.Info) extends Event
+  private final case class Created(item: AuctionableItem, auctionId: Id) extends Event
+  private final case class BidPlaced(bid: Bid, replyTo: ActorRef[Auction.Publish]) extends Event
+  private final case class RemovedBid(bidder: Bidder.Info) extends Event
+
+  sealed trait Publish extends Message
+  case class Msg(reason: String) extends Publish
+  case class NewMaxBid(id: Auction.Id, price: Int, item: String) extends Publish
+  case class AuctionSold(id: Auction.Id) extends Publish
+
+
   // case class AuctionDeleted(acc: Auction) extends AuctionEvent
   // case class NewBidPlaced(bid: Bid) extends AuctionEvent
   // case class AckAuction(msg: String) extends AuctionEvent
@@ -49,7 +56,7 @@ object Auction:
   private final case class BankResponse(resp: BankGatewayResponse) extends Command
   private final case class ReceptionistEbay(bankRef: Option[ActorRef[eBay.Command]], replyTo: ActorRef[Seller.Command]) extends Command
 
-  private final case class BidState(bid: Bid, replyTo: ActorRef[Bidder.Command])
+  private final case class BidState(bid: Bid, replyTo: ActorRef[Auction.Publish])
 
   private case class State(item: AuctionableItem, auctionId: Id, bids: TreeSet[BidState]):
 
@@ -81,7 +88,7 @@ object Auction:
 
     def applyEvent(event: Event) = 
       event match {
-        case AuctionCreated(item, ref) => initAuction(item, ref)
+        case Created(item, ref) => initAuction(item, ref)
         case BidPlaced(bid, owner) => placeBid(BidState(bid, owner))
         case RemovedBid(bidder) => removeBid(bidder)
         // case AuctionDeleted(_) => ???
@@ -120,15 +127,47 @@ object Auction:
               Effect.none
             }
 
-            case PlaceBid(bid, replyTo) => {
-              if (bid.amount > state.maxBid()._2)
-                replyTo ! Bidder.Reply(StatusCode.Failed, "Bid needs to be higher than current one")
+            case PlaceBid(bid, replyTo, subscribe) => {
+              if (bid.amount < state.maxBid()._2)
+                replyTo ! Bidder.Reply(StatusCode.Failed, s"Bid (${bid.amount}) needs to be higher than current one (${state.maxBid()._2})")
                 Effect.none
               else
-                Effect.persist(BidPlaced(bid, replyTo)).thenReply(replyTo)(_ => Bidder.Reply(StatusCode.OK, "Bid Placed"))
+                Effect
+                  .persist(BidPlaced(bid, subscribe))
+                  .thenRun {state => 
+                    replyTo ! Bidder.Reply(StatusCode.OK, "Bid Placed")
+                    state.bids.foreach(elt => elt.replyTo ! Auction.NewMaxBid(state.auctionId, bid.amount, state.item.itemType))
+                }
             }
 
-            case CancelBid(bidder, replyTo) => Effect.persist(RemovedBid(bidder)).thenReply(replyTo)(_ => Bidder.Reply(StatusCode.OK, "Bid Deleted"))
+            case CancelBid(bidder, replyTo) => {
+              val currentMax = state.bids.headOption 
+              currentMax match {
+                case Some(max) => {
+                  replyTo ! Bidder.Reply(StatusCode.OK, "Bid Removed") //Sketchy to confirm removal before calling Effect.Persist but whatever
+                  if (bidder.id == max.bid.bidder.id)                   //Deleted Bid was maximum one, need to notify the other bidders than price changed
+                    Effect
+                      .persist(RemovedBid(bidder))                    //remove Bid, Need to check if there are any bids left before sending NewMaxBid message
+                      .thenRun {_ => 
+                        //BUG: For some reason still returns old maximum value
+                        val newMax = state.bids.headOption            //Need to check if there are any other Bids, for some reason, still sends out old state
+                        newMax match {
+                          case Some(max) => {
+                            context.log.error(s"BUG: New max ${newMax} is still old max value, event if state has been updated")
+                            state.bids.foreach(elt => elt.replyTo ! Auction.NewMaxBid(state.auctionId, max.bid.amount, state.item.itemType))
+                            replyTo ! Bidder.Reply(StatusCode.OK, "Bid Removed")
+                          }
+                          case None => replyTo ! Bidder.Reply(StatusCode.OK, "Bid Removed")
+                        }
+                    }
+                    else 
+                      Effect 
+                        .persist(RemovedBid(bidder))
+                        .thenReply(replyTo)(_ => Bidder.Reply(StatusCode.OK, "Bid Removed"))
+                }
+                case None => Effect.none.thenReply(replyTo)(_ => Bidder.Reply(StatusCode.Failed, "No Bid placed"))
+              }
+            }
 
             case Init(item, replyToSeller) => {
               try {
@@ -145,7 +184,7 @@ object Auction:
                     ReceptionistEbay(None, replyToSeller)
                   }
                 }
-                Effect.persist(AuctionCreated(item, Id(auctionId)))
+                Effect.persist(Created(item, Id(auctionId)))
                   .thenReply(replyToSeller)(_ => Seller.Reply(StatusCode.OK, "Auction Input Valid"))
               }
               catch {

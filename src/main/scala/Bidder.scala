@@ -53,7 +53,7 @@ object Bidder:
   }
 
   private case class ListingResponse(listing: Receptionist.Listing) extends Command
-  private case class AuctionEvent(event: Auction.Event) extends Command
+  private case class AuctionPublish(event: Auction.Publish) extends Command
   private case object Ignore extends Command
   private case class GotBank(usr: User) extends Command
   private case class SendToMain(auctions: List[DisplayableAuction], replyTo: ActorRef[eBayMainActor.Protocol]) extends Command
@@ -66,7 +66,7 @@ object Bidder:
       context.self ! Bidder.Create(user, BidderId(id))
 
       val listingAdapter = context.messageAdapter[Receptionist.Listing](rsp => ListingResponse(rsp))
-      val auctionEventAdapter = context.messageAdapter[Auction.Event](rsp => AuctionEvent(rsp))
+      val auctionPublishAdapter = context.messageAdapter[Auction.Publish](rsp => AuctionPublish(rsp))
 
       import scala.concurrent.duration.DurationInt
       implicit val timeout: Timeout = 3.seconds
@@ -78,6 +78,16 @@ object Bidder:
             context.system.receptionist ! Receptionist.Find(BankGateway.Key, listingAdapter)
             Effect.persist(Created(newUser, id))
 
+          }
+
+          case AuctionPublish(event) => {
+            context.log.info(s"Got ${event} from Auction")
+            event match {
+              case Auction.NewMaxBid(id, price, item) => context.log.info(s"Auction ${id} on ${item} has a new max price: ${price}")
+              case Auction.Msg(reason) => context.log.info(reason)
+              case Auction.AuctionSold(id) => context.log.info(s"Auction ${id} has been sold")
+            }
+            Effect.none
           }
 
           case ListingResponse(BankGateway.Key.Listing(listings)) => {
@@ -128,7 +138,8 @@ object Bidder:
           case PlaceBid(amount, auction) => {
             auction ! Auction.PlaceBid(
               Bid(Bidder.Info(state.user, state.id), amount), 
-              context.self)
+              context.self,
+              auctionPublishAdapter)
             Effect.none
           }
 
