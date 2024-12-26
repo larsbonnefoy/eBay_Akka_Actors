@@ -19,6 +19,9 @@ import _root_.eBayMicroServ.Seller.Info
 import akka.actor.typed.pubsub.PubSub
 import akka.actor.typed.pubsub.Topic
 import akka.actor.Status
+import scala.concurrent.duration.Duration
+import scala.concurrent.duration.FiniteDuration
+import _root_.eBayMicroServ.BankGateway.PaymentFailed
 
 object Auction:
   case class Id(id: UUID)
@@ -39,6 +42,7 @@ object Auction:
   private final case class Created(item: AuctionableItem, auctionId: Id) extends Event
   private final case class BidPlaced(bid: Bid, replyTo: ActorRef[Auction.Publish]) extends Event
   private final case class RemovedBid(bidder: Bidder.Info) extends Event
+  private case object RemovedAuction extends Event
 
   sealed trait Publish extends Message
   case class Msg(reason: String) extends Publish
@@ -53,8 +57,12 @@ object Auction:
   /**Internal Protocol**/
   implicit private val bidOrdering: Ordering[BidState]= Ordering.by(-_.bid.amount)
   private case class Init(item: AuctionableItem, replyTo: ActorRef[Seller.Command]) extends Command //-> Dont need this message as the auction is created when Actor is initalized
-  private final case class BankResponse(resp: BankGatewayResponse) extends Command
-  private final case class ReceptionistEbay(bankRef: Option[ActorRef[eBay.Command]], replyTo: ActorRef[Seller.Command]) extends Command
+  private case object Ignore extends Command
+  private final case class ReceptionistEbay(eBayRef: Option[ActorRef[eBay.Command]], replyTo: ActorRef[Seller.Command]) extends Command
+  private final case class StartAuctionValidation(bankRef: ActorRef[BankGateway.Command], winningBid: BidState) extends Command
+  private final case class StartTimer(time: FiniteDuration) extends Command
+  private object TimerExpired extends Command
+  
 
   private final case class BidState(bid: Bid, replyTo: ActorRef[Auction.Publish])
 
@@ -108,18 +116,71 @@ object Auction:
 
   def apply(item: AuctionableItem, ownerRef: ActorRef[Seller.Command]): Behavior[Command] =
     Behaviors.setup { context =>
+      Behaviors.withTimers { timers =>
 
       import scala.concurrent.duration.DurationInt
       implicit val timeout: Timeout = 3.seconds
 
       val auctionId = mkUUID()
+      val auctionDuration = 5.seconds
 
-      context.log.info(s"Created Auction Manager")
       context.self ! Init(item, ownerRef)
 
       def commandHandlerImpl(state: State, command: Command): Effect[Event, State] = {
           context.log.info(s"Processing ${command}")
           command match {
+
+            case Init(item, replyToSeller) => {
+              try {
+                require(item.startingPrice > 0, "Price cannot be negative")
+                //Checks passed, retreive EbayRef
+                context.ask(context.system.receptionist, Receptionist.Find(eBay.Key)) {
+                  case Success(listing: Receptionist.Listing) =>  {
+                    val serviceInstances = listing.serviceInstances(eBay.Key)
+                    ReceptionistEbay(serviceInstances.headOption, replyToSeller)
+                  }
+                  case Failure(exception) => {
+                    context.log.error("Failed to get response from Receptionist", exception)
+                    ReceptionistEbay(None, replyToSeller)
+                  }
+                }
+                Effect.persist(Created(item, Id(auctionId)))
+                  .thenReply(replyToSeller)(_ => Seller.Reply(StatusCode.OK, "Auction Input Valid"))
+              }
+              catch {
+                case e: Exception => Effect.none.thenReply(replyToSeller)(_ => Seller.Reply(StatusCode.Failed, e.getMessage()))
+              }
+            }
+
+            case ReceptionistEbay(maybeEbayRef, sellerRef) => {
+              maybeEbayRef match {
+                case Some(ref) => {
+                  context.log.info("Sent Registration Request")
+
+                  //TODO: Kinda assumed to always succeed, eBay does not respond to Auction directly => What happens
+                  //if ebay is not available directly: Should retry for a certain time, and then destroy auction in 
+                  //case and notify Seller
+
+                  context.ask(ref, (replyTo: ActorRef[eBay.Response]) => eBay.RegisterAuction(eBay.AuctionListing(state.auctionId, context.self), sellerRef, replyTo)) {
+                    case Success(eBay.Response(code, msg)) => StartTimer(auctionDuration)
+                    //case ebayReply @ Success (_) => context.log.error(s"Got unhandled ${ebayReply}"); Ignore
+                    case Failure(exception) => context.log.error(s"Could not Register auction to eBay: ${exception}"); Ignore
+
+                  }
+                  //ref ! eBay.RegisterAuction(eBay.AuctionListing(state.auctionId, context.self), sellerRef) //Seller Ref for Forward Flow
+                }
+                case None => context.log.error("eBay not registered")
+              }
+              Effect.none
+            }
+
+            case StartTimer(duration) => {
+              context.log.info(s"Starting Timer ${duration} for Auction") 
+              timers.startSingleTimer("AuctionTimer", TimerExpired, duration)
+              Effect.none
+            }
+
+            case Ignore => Effect.none
 
             case GetMaxBid(replyTo) => { 
               val (item, price) = state.maxBid()
@@ -169,51 +230,67 @@ object Auction:
               }
             }
 
-            case Init(item, replyToSeller) => {
-              try {
-                require(item.startingPrice > 0, "Price cannot be negative")
-                //Checks passed, retreive EbayRef
-                context.ask(context.system.receptionist, Receptionist.Find(eBay.Key)) {
+            //Need to contact Bank with Seller and Buyer
+            //1. -> Need to send Both ActorRefs to Bank
+            //2. Bank Contacts with business Handshake.
+            //  2.1 Can get both responses => Ok 
+            //  2.2 On of the two actors (Seller/Buyer) does not respond = Failure
+            //3. Bank does not respond within time = Failure
+            case TimerExpired => {
+              context.log.error("Timer For auction as just expired")
+              val bidder = state.bids.headOption 
+              bidder.fold {
+                context.log.info(s"No bidders for auction ${state.auctionId}, Placing auction Again")
+                StartTimer(auctionDuration)
+              } { winningBid => 
+
+                context.ask(context.system.receptionist, Receptionist.Find(BankGateway.Key)) {
                   case Success(listing: Receptionist.Listing) =>  {
-                    context.log.info(s"Got Response: ${listing}")
-                    val serviceInstances = listing.serviceInstances(eBay.Key)
-                    ReceptionistEbay(serviceInstances.headOption, replyToSeller)
+                    val serviceInstances = listing.serviceInstances(BankGateway.Key)
+                    serviceInstances.headOption match {
+                      case Some(ref) => StartAuctionValidation(ref, winningBid)
+                      case None => context.log.error("Receptionist Bank Ref is empty"); Ignore
+                    }
                   }
                   case Failure(exception) => {
                     context.log.error("Failed to get response from Receptionist", exception)
-                    ReceptionistEbay(None, replyToSeller)
+                    Ignore
                   }
                 }
-                Effect.persist(Created(item, Id(auctionId)))
-                  .thenReply(replyToSeller)(_ => Seller.Reply(StatusCode.OK, "Auction Input Valid"))
-              }
-              catch {
-                case e: Exception => Effect.none.thenReply(replyToSeller)(_ => Seller.Reply(StatusCode.Failed, e.getMessage()))
-              }
-            }
-
-            case ReceptionistEbay(maybeEbayRef, sellerRef) => {
-              maybeEbayRef match {
-                case Some(ref) => {
-                  context.log.info("Sent Registration Request")
-
-                  //TODO: Kinda assumed to always succeed, eBay does not respond to Auction directly => What happens
-                  //if ebay is not available directly: Should retry for a certain time, and then destroy auction in 
-                  //case and notify Seller
-                  ref ! eBay.RegisterAuction(eBay.AuctionListing(state.auctionId, context.self), sellerRef) //Seller Ref for Forward Flow
-                }
-                case None => context.log.error("eBay not registered")
               }
               Effect.none
             }
 
-            // case Remove(seller, replyTo ) => {
-            //   seller match {
-            //     case Info(_, id) if id == state.item.owner.id =>  ???
-            //   }
-            // }
+            case StartAuctionValidation(bankRef, winingBid) => {
+              val bidder = winingBid.bid.bidder.usr
+              val seller = state.item.owner.usr
+              val amount = winingBid.bid.amount
+              context.ask(bankRef, (replyTo: ActorRef[BankGateway.Response]) => BankGateway.PaymentRequest(seller, bidder, amount, replyTo)){
+                case Failure(exception) => context.log.error(s"Could no contact bank to proceed for payment: ${exception}"); StartTimer(auctionDuration)
+                case Success(BankGateway.PaymentFailed(reason)) => context.log.error(s"Payment Failed: ${reason}"); StartTimer(auctionDuration)
+                case Success(BankGateway.PaymentSucceded) => context.log.info("Payment successfull, Removing Auction"); Remove(item.owner, ownerRef)
+              }
+              Effect.none
+            }
 
-            case BankResponse(_) => ???
+            case Remove(seller, replyTo) => {
+              seller match {
+                case Info(_, id) if id == state.item.owner.id =>  {
+                  //Notify Bidders
+                  state.bids.foreach{ bid => 
+                    bid.replyTo ! AuctionSold(state.auctionId)
+                  }
+                  //TODO: Unregister from eBay
+                  //
+                  Effect.none
+                }
+                case Info(_, _) => {
+                  context.log.error(s"Unauthorized: ${seller} does not own Auction")
+                  Effect.none
+                }
+              }
+            }
+
           }
         }
 
@@ -223,11 +300,11 @@ object Auction:
           updatedResult
       }
 
-
-      EventSourcedBehavior[Command, Event, State] (
-        persistenceId = PersistenceId.ofUniqueId(auctionId.toString()),
-        emptyState = State.default, 
-        commandHandler = (state, command) => commandHandlerImpl(state, command),
-        eventHandler = (state, event) => eventHandlerImpl(state, event)
-      )
+        EventSourcedBehavior[Command, Event, State] (
+          persistenceId = PersistenceId.ofUniqueId(auctionId.toString()),
+          emptyState = State.default, 
+          commandHandler = (state, command) => commandHandlerImpl(state, command),
+          eventHandler = (state, event) => eventHandlerImpl(state, event)
+        )
+      }
     }

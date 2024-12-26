@@ -7,12 +7,7 @@ import akka.NotUsed
 import akka.actor.Terminated
 import akka.event.Logging
 
-
-
-
-
-
-case class User(name: String, bank: Option[BankAccount] = None)
+case class User(name: String, bank: Option[BankGateway.BankAccount] = None)
 
 object eBayMainActor {
   trait Protocol
@@ -26,15 +21,15 @@ object eBayMainActor {
       val bankRef = context.spawn(BankGateway(), "Bank")
       val ebayRef = context.spawn(eBay(), "eBay")
 
-      val sellers = (1 to 2).map(pos => context.spawnAnonymous(Seller(User(s"Seller${pos}"))))
-      val bidders = (1 to 2).map(pos => context.spawnAnonymous(Bidder(User(s"Bidder${pos}"), ebayRef)))
+      val sellers = (1 to 5).map(pos => context.spawnAnonymous(Seller(User(s"Seller${pos}"))))
+      val bidders = (1 to 10).map(pos => context.spawnAnonymous(Bidder(User(s"Bidder${pos}"), ebayRef)))
 
       Thread.sleep(2000)
       context.log.info("Creating Auctions")
       
-      // sellers.foreach(seller => seller ! Seller.CreateAuction("Test", 10))
-      sellers(0) ! Seller.CreateAuction("First", 1)
-      sellers(1) ! Seller.CreateAuction("Second", 100)
+      sellers.foreach(seller => seller ! Seller.CreateAuction("Item", 10))
+      //sellers(0) ! Seller.CreateAuction("First", 1)
+      // sellers(1) ! Seller.CreateAuction("Second", 100)
 
       //Bidds need to be Created before we can call GetAuctions
       Thread.sleep(2000)
@@ -46,10 +41,7 @@ object eBayMainActor {
         message match {
           case AuctionList(lst) => {
               lst.foreach(elt => context.log.info(s"- ${elt}"))
-              bidders(0) ! Bidder.PlaceBid(10, lst(0).auctionRef)
-              bidders(1) ! Bidder.PlaceBid(100, lst(0).auctionRef)
-              //Thread.sleep(1000) //Wait a bit that bid is placed
-              bidders(1) ! Bidder.RemoveBid(lst(0).auctionRef)
+              bidders(0) ! Bidder.PlaceBid(2, lst(0).auctionRef)
           }
           Behaviors.same
         }

@@ -13,6 +13,7 @@ import akka.pattern.ask
 import scala.util.Success
 import scala.concurrent.duration.DurationInt
 import akka.util.Timeout
+import akka.actor.Status
 
 
 object eBay:
@@ -23,12 +24,12 @@ object eBay:
   /**eBay Protocol**/
   trait ebayMessage
   sealed trait Command extends ebayMessage
-  case class RegisterAuction(listing: AuctionListing, replyTo: ActorRef[Seller.Command]) extends Command
+  case class RegisterAuction(listing: AuctionListing, replyToSeller: ActorRef[Seller.Command], replyToThis: ActorRef[eBay.Response]) extends Command
   case class AvailableAuctions(replyTo: ActorRef[Bidder.Command]) extends Command
 
   sealed trait Event extends ebayMessage
   case class RegisteredAuction(aucc: AuctionListing) extends Event
-  case class ebayAck(msg: String) extends Event
+  case class Response(code: StatusCode, msg: String)
 
   case class AuctionListResult(list: List[DisplayableAuction]) extends Command
 
@@ -54,12 +55,16 @@ object eBay:
         commandHandler = { (state, command) =>
           context.log.info(s"Processing ${command}")
           command match {
-            case RegisterAuction(aucc, replyTo) =>
+            case RegisterAuction(aucc, replyToSeller, replyToAuction) =>
               Effect
                 .persist(RegisteredAuction(aucc))
-                .thenReply(replyTo)(_ =>
-                  Seller.Reply(StatusCode.OK, "Auction Registered Successfully")
-                )
+                .thenRun { _ => 
+                    replyToAuction ! eBay.Response(StatusCode.OK, "Auction Registered Successfully")
+                    replyToSeller ! Seller.Reply(StatusCode.OK, "Auction Registered Successfully")
+                }
+                // .thenReply(replyToSeller)(_ =>
+                //   Seller.Reply(StatusCode.OK, "Auction Registered Successfully")
+                // )
 
             case AvailableAuctions(replyTo) => {
               val refSet = state.auctions.map(auction => auction.auctionRef)

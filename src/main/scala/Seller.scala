@@ -19,8 +19,8 @@ import scala.util.{Try, Success, Failure}
 case class AuctionableItem(owner: Seller.Info, startingPrice: Int, itemType : String)
 
 object Seller:
-  final case class SellerId(id: UUID)
-  case class Info(usr: User, id: SellerId)
+  final case class Id(id: UUID)
+  case class Info(usr: User, id: Id)
 
 /*****Seller Protocol********/
   sealed trait Command
@@ -28,13 +28,13 @@ object Seller:
   case class Reply(code: StatusCode, msg: String) extends Command
 
   sealed trait Event 
-  case class Created(newUser: User, newId: SellerId) extends Event
+  case class Created(newUser: User, newId: Id) extends Event
   case class AddedBank(userWithBank: User) extends Event
 
-  final private case class State(user: User, id: SellerId) {
+  final private case class State(user: User, id: Id) {
     def setBank(userWithBank: User) = this.copy(user = userWithBank)
 
-    def initSeller(newUser: User, newId: SellerId) = 
+    def initSeller(newUser: User, newId: Id) = 
       this.copy(user = newUser, id = newId)
 
     def applyEvent(event: Event) = 
@@ -45,8 +45,9 @@ object Seller:
 
   }
 
-  private case class Init(usr: User, id: SellerId) extends Command
+  private case class Init(usr: User, id: Id) extends Command
   private case class ListingResponse(listing: Receptionist.Listing) extends Command
+  private case class BankResponse(res: BankGateway.Response) extends Command
   private case class GotBank(usr: User) extends Command
   private case object Ignore extends Command
 
@@ -56,9 +57,10 @@ object Seller:
       implicit val timeout: Timeout = 3.seconds
       val id = mkUUID()
 
-      context.self ! Seller.Init(user, SellerId(id))
+      context.self ! Seller.Init(user, Id(id))
 
       val listingAdapter = context.messageAdapter[Receptionist.Listing](rsp => ListingResponse(rsp))
+      val bankAdapter = context.messageAdapter[BankGateway.Response](rsp => BankResponse(rsp))
 
       def commandHandlerImpl(state: State, command: Command): Effect[Event, State] = {
         command match {
@@ -69,12 +71,19 @@ object Seller:
           case ListingResponse(BankGateway.Key.Listing(listings)) => {
             listings.headOption match {
               case Some(bankGateWayRef) => {
-                context.ask(bankGateWayRef, (replyTo: ActorRef[BankGatewayResponse]) => BankGatewayCommand(RegisterUser(state.user), mkUUID(), replyTo)) {
-                  case scala.util.Success(BankGatewayEvent(id, event)) => {
-                    event match
-                      case NewUserAccount(user) => GotBank(user)
-                    }
+
+                //FIX: Getting a new bankAccount is duplicated in Bidder and Seller, should be moved to another actor
+                /*
+                  NOTE: Weird Impl
+                  When registering user we need to send an ActorRef so that the bank can contact the seller later, once auction is finished
+                  Using the context.ask, replyTo is temporary => Need to send 2 actors refs, one temp, one longer lived
+                  1. Either we use only bankAdapter, this removes the implict request timeout from context.ask and puts handeling code lower
+                  2. Give 2 refs to RegisterUser, one Temp, and one longer lived
+                */
+                context.ask(bankGateWayRef, replyTo => BankGateway.RegisterUser(state.user, replyTo, bankAdapter)) {
+                  case scala.util.Success(BankGateway.RegistrationSuccessful(usr)) => GotBank(usr)
                   case scala.util.Failure(_) => context.log.error("BankGateWay Ask Failed"); Ignore
+                  case arg @ scala.util.Success(_) => context.log.error(s"Got unexpected command from bank ${arg}"); Ignore
                 }
                 Effect.none
               }
@@ -100,7 +109,15 @@ object Seller:
             Effect.none
           }
           case Reply(code, msg) => context.log.info(s"${code}: ${msg}"); Effect.none
-          case ListingResponse(_) => ??? // For some reason Match case is not happy, case is present twice
+          case ListingResponse(_) => ???
+
+          case BankResponse(res) => {
+            res match {
+              case BankGateway.TransactionAckQuery(replyTo) => replyTo ! BankGateway.TranscationAckResponse(StatusCode.OK)
+              case msg @ _ => context.log.error(s"got unexpected message ${msg}")
+            }
+            Effect.none
+          } 
         }
       }
 
@@ -114,7 +131,7 @@ object Seller:
 
       EventSourcedBehavior[Command, Event, State] (
         persistenceId = PersistenceId.ofUniqueId(id.toString()),
-        emptyState = State(null.asInstanceOf[User], null.asInstanceOf[SellerId]),
+        emptyState = State(null.asInstanceOf[User], null.asInstanceOf[Id]),
         commandHandler = (state, cmd) => commandHandlerImpl(state, cmd),
         eventHandler = (state, event) => eventHandlerImpl(state, event)
       ).onPersistFailure(SupervisorStrategy.restartWithBackoff(minBackoff = 10.seconds, maxBackoff = 60.seconds, randomFactor = 0.1))
